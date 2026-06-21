@@ -12,6 +12,14 @@ import datetime
 from database import engine, Base, get_db
 import models
 import schemas
+from groq import Groq
+from PyPDF2 import PdfReader
+import pytesseract
+from pdf2image import convert_from_path
+
+# Setup Groq API key
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 # Create all tables
 Base.metadata.create_all(bind=engine)
@@ -306,3 +314,89 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
         "approved_revisions": approved,
         "rejected_revisions": rejected
     }
+
+@app.get("/documents/{doc_id}/compare")
+def compare_document_revisions(doc_id: int, rev_old: int, rev_new: int, db: Session = Depends(get_db)):
+    if not client:
+        raise HTTPException(status_code=500, detail="Groq API Key bulunamadı. Yapay zeka özelliği şu an devre dışı.")
+
+    # Get document and revisions
+    doc = db.query(models.Document).filter(models.Document.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Doküman bulunamadı.")
+    
+    old_revision = next((r for r in doc.revisions if r.rev_no == rev_old), None)
+    new_revision = next((r for r in doc.revisions if r.rev_no == rev_new), None)
+
+    if not old_revision or not new_revision:
+        raise HTTPException(status_code=404, detail="Belirtilen revizyonlar bulunamadı.")
+
+    old_file_path = os.path.join(STORAGE_DIR, old_revision.file_path)
+    new_file_path = os.path.join(STORAGE_DIR, new_revision.file_path)
+
+    if not os.path.exists(old_file_path) or not os.path.exists(new_file_path):
+        raise HTTPException(status_code=404, detail="Revizyon dosyaları sunucuda bulunamadı.")
+
+    try:
+        # Extract text from PDFs
+        def extract_text_from_pdf(pdf_path):
+            text = ""
+            # First attempt: Try to read native text using PyPDF2
+            try:
+                reader = PdfReader(pdf_path)
+                for page in reader.pages:
+                    extracted = page.extract_text()
+                    if extracted:
+                        text += extracted + "\n"
+            except Exception as e:
+                pass
+            
+            text = text.strip()
+            
+            # Second attempt (Fallback): If no native text found, use OCR
+            if not text or len(text) < 50:
+                try:
+                    # Convert PDF pages to images (limit to first 3 pages to save time/memory)
+                    images = convert_from_path(pdf_path, dpi=200, first_page=1, last_page=3)
+                    for img in images:
+                        # Extract text from image using Tesseract with Turkish language
+                        text += pytesseract.image_to_string(img, lang='tur') + "\n"
+                except Exception as e:
+                    pass
+
+            return text.strip()
+
+        old_text = extract_text_from_pdf(old_file_path)
+        new_text = extract_text_from_pdf(new_file_path)
+
+        if not old_text and not new_text:
+            raise HTTPException(status_code=500, detail="PDF dosyalarından metin okunamadı (Dosyalar sadece resimden oluşuyor olabilir).")
+        
+        prompt = (
+            "Sen uzman bir kalite kontrol ve üretim mühendisisin. Aşağıda iki teknik belgenin metin içeriklerini vereceğim.\n\n"
+            f"=== ESKİ REVİZYON METNİ ===\n{old_text[:3000]}\n\n"
+            f"=== YENİ REVİZYON METNİ ===\n{new_text[:3000]}\n\n"
+            "Görevin: Yeni revizyonda eski revizyona kıyasla metinsel olarak NELERİN DEĞİŞTİRİLDİĞİNİ tespit etmektir.\n"
+            "Farklılıkları analiz et. Raporunu aşağıdaki başlıklarda düzenle:\n\n"
+            "### 🔄 Değişen Noktalar\n(Madde madde neler değişmiş)\n\n"
+            "### ⚠️ Kritik Uyarılar\n(Onay makamının dikkat etmesi gereken önemli metin veya ölçü değişiklikleri)\n\n"
+            "### 💡 Genel Değerlendirme\n(Değişikliklerin kapsamı hakkında 1-2 cümlelik kısa özet)\n\n"
+            "Lütfen raporunu net, anlaşılır ve profesyonel bir dille Türkçe olarak yaz."
+        )
+
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
+
+        return {"analysis": response.choices[0].message.content}
+
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Yapay zeka analiz hatası: {str(e)}")

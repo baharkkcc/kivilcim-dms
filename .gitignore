@@ -2,3 +2,8 @@
 __pycache__
 .streamlit
 venv
+
+.env
+backend/storage/
+*.pyc
+

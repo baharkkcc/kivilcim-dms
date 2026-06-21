@@ -288,6 +288,31 @@ if 'view_doc_id' in st.session_state and st.session_state.view_doc_id:
                         
                         if can_approve:
                             st.markdown("#### Eylemleriniz")
+                            
+                            # Yapay Zeka Karşılaştırması
+                            if r['rev_no'] > 0:
+                                ai_key = f"ai_summary_{r['id']}"
+                                if st.button("✨ Yapay Zeka Analizi (Değişiklikleri Gör)", key=f"ai_btn_{r['id']}", type="primary", use_container_width=True):
+                                    with st.spinner("Gemini Yapay Zeka Belgeleri Karşılaştırıyor... Lütfen bekleyin."):
+                                        prev_rev = r['rev_no'] - 1
+                                        try:
+                                            res = requests.get(f"{API_URL}/documents/{doc_id}/compare", params={"rev_old": prev_rev, "rev_new": r['rev_no']})
+                                            if res.status_code == 200:
+                                                st.session_state[ai_key] = res.json().get("analysis")
+                                            else:
+                                                st.error(f"Hata: {res.json().get('detail')}")
+                                        except Exception as e:
+                                            st.error(f"Sisteme erişilemedi: {str(e)}")
+                                            
+                                if st.session_state.get(ai_key):
+                                    st.success("Analiz Tamamlandı!")
+                                    st.markdown(f"""
+                                    <div style="background-color: #f8fafc; padding: 15px; border-radius: 8px; border-left: 4px solid #6366f1; margin-bottom: 15px; font-size: 0.9em;">
+                                        {st.session_state[ai_key]}
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                
+                                st.markdown("<br>", unsafe_allow_html=True)
                             if st.button("✅ Onayla", key=f"app_btn_{r['id']}", use_container_width=True):
                                 requests.post(f"{API_URL}/approvals/{my_approval_id}/approve", params={"user_id": current_user['id']})
                                 st.rerun()
